@@ -77,8 +77,11 @@ function loadQuestions(file, limit = 0) {
     const truth = q.answer ?? q.truth ?? q.want ?? '';
     // oracle 臂要用的「正确答案所在的那篇文档」
     const want = q.want ?? q.doc ?? '';
-    if (!question || !truth) throw new Error(`第 ${i + 1} 题缺 q 或 answer`);
-    return { question, truth: String(truth), want: String(want), id: q.id ?? `q${i + 1}` };
+    // ⚠ 弃答题**没有** ground truth 串(正确答案是「不知道」)⇒ 不能套用下面的非空检查,
+    //   否则题集加载阶段就抛。判据由 `expectRefusal` 携带,判分在 `grade()` 里反向。
+    const expectRefusal = q.expectRefusal === true;
+    if (!question || (!truth && !expectRefusal)) throw new Error(`第 ${i + 1} 题缺 q 或 answer`);
+    return { question, truth: String(truth ?? ''), want: String(want), expectRefusal, id: q.id ?? `q${i + 1}` };
   });
 }
 
@@ -161,6 +164,26 @@ const ARM_DEFS = {
     system: '你是个人助理,回答用户问题。下面「长期记忆」段是用户的事实记录,请优先依据它作答。',
     block: 'oracle',
   },
+  // ⚠ 弃答臂:问的是**语料里根本没有答案**的问题(题集侧标 `expectRefusal: true`)。
+  //   它回答的是「注入了记忆之后,模型是**更诚实**还是**更爱编**」——
+  //   长上下文 + distractor 会显著抬高幻觉率(Chroma「Impact of Distractors」实测:
+  //   GPT 系幻觉率最高,Claude 更常 abstain)。这正是「加了记忆反而更差」的可能路径。
+  //   ⚠ 判分**反过来**:拒答=对,答出任何东西=错。
+  //   ⚠ 它**不能**与 armA 共用题集 —— 两类题的「对」定义相反。
+  armD: {
+    label: '臂 D 弃答(语料无答案)',
+    system: '你是个人助理,回答用户问题。下面「长期记忆」段是用户的事实记录,请优先依据它作答。',
+    block: 'index',
+  },
+  // ⚠ 噪声臂:真实索引 **+ 等字节的无关虚构文本**。
+  //   回答的是「相关+无关混合是否比纯相关更差」(Chroma 实测:是,且结构连贯反而更糟)。
+  //   ⚠ **长度是混淆项,且不可消除** —— 「加噪声」必然「加长度」,两者在本设计里不可分。
+  //     所以读法是「在真实索引之上再叠等量无关上下文会怎样」,**不是**「噪声的净效应」。
+  armN: {
+    label: '臂 N 索引+等量噪声',
+    system: '你是个人助理,回答用户问题。下面「长期记忆」段是用户的事实记录,请优先依据它作答。',
+    block: 'noisyIndex',
+  },
 };
 
 function oracleBlock(docRel) {
@@ -176,7 +199,10 @@ function messagesFor(arm, question, docRel) {
   const parts = [def.system];
   if (def.block === 'index') parts.push('', indexBlock());
   else if (def.block === 'placebo') parts.push('', placeboBlock(Buffer.byteLength(indexBlock(), 'utf8')));
-  else if (def.block === 'oracle') parts.push('', oracleBlock(docRel));
+  else if (def.block === 'noisyIndex') {
+    const real = indexBlock();
+    parts.push('', real, '', placeboBlock(Buffer.byteLength(real, 'utf8')));
+  } else if (def.block === 'oracle') parts.push('', oracleBlock(docRel));
   parts.push('', `问题:${question}`, '', '要求:直接给答案。若上面没有相关信息,只回「无法确定」。不要编造。');
   return [
     { role: 'system', content: parts[0] },
@@ -229,11 +255,15 @@ const RE_REFUSAL = /无法确定|不知道|没有相关|未找到|无法回答|�
  *   3. 拒答**不算对**。零记忆臂的失败模式是「承认不知道」而非「自信地编」,
  *      计为错才是诚实的。
  */
-function grade(answer, truth) {
+function grade(answer, truth, expectRefusal = false) {
   const norm = (s) => s.toLowerCase().replace(/\s+/g, '');
   const a = norm(answer);
-  const t = norm(truth);
+  const t = norm(truth ?? '');
   const refused = RE_REFUSAL.test(answer);
+  // ⚠ 弃答题:判据**反向** —— 拒答才对,答出任何东西都错。
+  //   别把它并进下面的 `a.includes(t)`:那类题的 `truth` 是**空串**,
+  //   而 `任何字符串.includes('')` 恒为 true ⇒ 不特判的话**每题都会判对**。
+  if (expectRefusal) return { ok: refused, reason: refused ? 'refused' : 'miss' };
   if (refused && !a.includes(t)) return { ok: false, reason: 'refused' };
   if (a.includes(t)) return { ok: true, reason: 'hit' };
   return { ok: false, reason: refused ? 'refused' : 'miss' };
@@ -301,7 +331,7 @@ for (const q of questions) {
     for (let k = 0; k < REPEAT; k++) {
       try {
         const out = await callModel(messagesFor(arm, q.question, q.want));
-        runs.push({ ...grade(out.content, q.truth), content: out.content });
+        runs.push({ ...grade(out.content, q.truth, q.expectRefusal === true), content: out.content });
       } catch (e) {
         runs.push({ ok: false, reason: `error:${e.message}`, content: '' });
       }
@@ -370,15 +400,30 @@ if (asJson) {
   // 出处:LongMemEval 把 closed-book 当零点基线,arXiv:2410.10813。
   // ⚠ 不自动剔除 —— 剔除是人的判断(可能是判分器的假阳性)。
   //   工具只负责**让它可见**;悄悄丢掉题目等于把不利证据藏起来。
+  //
+  // ⚠⚠ **弃答题必须排除在这条之外**(2026-10-11 实测踩到):
+  //   弃答题的「对」是**拒答**,而零记忆臂**本来就拒答** ⇒ 臂0 恒≈满分。
+  //   套用下面的文案会报「这些题没有判别力」—— **逻辑正好是反的**:
+  //   这里臂0 满分是**期望中的基线**,判别信息在**臂 D 掉没掉**上
+  //   (臂 D < 臂 0 ⇒ 注入记忆**诱导了幻觉**,那才是要看的信号)。
   if (arms.includes('arm0')) {
-    const leaky = rows.filter((r) => r.arm0.ok);
-    if (leaky.length === 0) {
-      console.log(`  ✅ 闭卷预筛:零点臂 0/${rows.length} —— 全部题目都有判别力。`);
+    const graded = rows.filter((r) => !r.expectRefusal);
+    const abstain = rows.filter((r) => r.expectRefusal);
+    const leaky = graded.filter((r) => r.arm0.ok);
+    if (graded.length === 0) {
+      const ref = rows.filter((r) => r.arm0.ok).length;
+      console.log(`  ℹ 闭卷预筛**不适用于本批**:${rows.length} 题全是弃答题(无 ground truth 串)。`);
+      console.log(`     弃答题上臂0 拒答 ${ref}/${rows.length} 是**期望基线**,不是「题目没判别力」。`);
+      console.log(`     ⇒ 要看的信号是**臂 D 相对臂0 掉没掉**:掉了 = 注入记忆诱导了幻觉。`);
+    } else if (leaky.length === 0) {
+      console.log(`  ✅ 闭卷预筛:零点臂 0/${graded.length} —— 全部题目都有判别力。`);
+      if (abstain.length) console.log(`     (另有 ${abstain.length} 题弃答题,按上面的弃答规则读,不计入本条)`);
     } else {
-      console.log(`  ⚠ 闭卷预筛:零点臂答对 ${leaky.length}/${rows.length} 题 ⇒ **这些题没有判别力**,`);
+      console.log(`  ⚠ 闭卷预筛:零点臂答对 ${leaky.length}/${graded.length} 题 ⇒ **这些题没有判别力**,`);
       console.log(`     基座靠常识就能蒙对,不该用来证明记忆有效。逐题看:`);
       leaky.forEach((r) => console.log(`       ${r.id}  ${r.question.slice(0, 46)}`));
       console.log(`     ⇒ 处置是**人工判断**:确认是常识捷径就剔除;若是判分器假阳性就改 ground truth。`);
+      if (abstain.length) console.log(`     (另有 ${abstain.length} 题弃答题,按上面的弃答规则读,不计入本条)`);
     }
     console.log('');
   }
