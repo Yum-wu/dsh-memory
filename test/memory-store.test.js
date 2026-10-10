@@ -195,6 +195,25 @@ test('渲染:超行数被截断并留可见标记', () => {
   assert.equal(r.text.split('\n').length, 11, '10 行正文 + 1 行标记')
 })
 
+test('⚠ 渲染:截断**保留头部、砍掉尾部** —— 方向是刻意的,别翻(硬规则 6)', () => {
+  // 为什么锁这条:`MEMORY.md` 的布局是「人工策展内容在上、机器追加的 `## 自动记录` 在下」,
+  // 砍尾 = 先丢低信任的那批。若哪天把方向改成砍头,人工策展的高价值条目会**先丢**,
+  // 而且**写入方收不到任何信号** —— 这正是 Claude Code 踩过的坑
+  // (`anthropics/claude-code` #39811 / #40210 / #56786)。
+  const many = Array.from({ length: 100 }, (_, i) => `行 ${i}`).join('\n')
+
+  const byLines = renderIndexSection(many, { maxLines: 10 })
+  assert.ok(byLines.text.startsWith('行 0'), '头部必须保留')
+  assert.ok(byLines.text.includes('行 9'), '第 10 行在保留范围内')
+  assert.equal(byLines.text.includes('行 10'), false, '第 11 行起必须被砍')
+  assert.equal(byLines.text.includes('行 99'), false, '尾部必须被砍')
+
+  // 字节路径也必须同向:砍的是尾部,不是头部
+  const byBytes = renderIndexSection(many, { maxLines: 1000, maxBytes: 60 })
+  assert.ok(byBytes.text.startsWith('行 0'), '字节截断同样保留头部')
+  assert.equal(byBytes.text.includes('行 99'), false)
+})
+
 test('渲染:超字节被截断', () => {
   const r = renderIndexSection('中'.repeat(2000), { maxLines: 1000, maxBytes: 100 })
   assert.equal(r.truncated, true)
