@@ -1,0 +1,38 @@
+{
+  "name": "dsh-memory",
+  "version": "0.1.0",
+  "description": "Cross-session long-term memory for DeepSeek Harness: markdown files + a budgeted constant system-prompt section + two read-only retrieval tools. Zero runtime dependencies.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "pretest": "node tools/make-fixture.mjs",
+    "test": "node --test \"test/*.test.js\"",
+    "fixture": "node tools/make-fixture.mjs",
+    "fixture:check": "node tools/make-fixture.mjs --check",
+    "recall": "node tools/recall-report.mjs",
+    "bench": "node tools/benchmark.mjs",
+    "effect": "node tools/effect-bench.mjs"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "AGENTS.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "memory",
+    "agent-memory",
+    "cordis-plugin"
+  ],
+  "license": "MIT"
+}

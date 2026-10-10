@@ -1,0 +1,30 @@
+# dsh-memory — 跨会话长期记忆(常驻提示词段 + 只读检索工具)
+#
+# ⚠ **两种挂载方式,只能选一种,同时用会重复注册。**
+#   ① **bundle 方式**:把 `dsh-memory` 加进 `~/.dsh/profiles/<p>/package.json` 的
+#      `dsh.profile.bundles` 数组 ⇒ 本文件被**自动**应用。
+#      (消费点:`@deepseek-ai/dsh-app-boot/lib/index.js:932` → `bundlePatchPaths()`,
+#       按 `@deepseek-ai/dsh/lib/profile-boot-*.js:194` 的 bundles 顺序;**不在 bundles 里就不消费**)
+#   ② **手工 insert 方式**:在 `~/.dsh/profiles/<p>/cordis.patch.yml` 里自己写下面这段。
+#   ⇒ 走 ① 就必须**删掉** ② 里那段 insert,否则同一个 id 被应用两次。
+#   本机当前用的是 **②**(dsh-memory 不在 bundles 数组里)。
+#
+# 本 bundle 只做一件事:向 profile 的 Loader 树 insert 这一行声明。
+# 不声明任何 dependencies / peerDependencies,也不写死运行时版本号 —— 一切从宿主解析。
+#
+# 记忆内容**不在本插件里**,而在 `memoryRoot` 指向的独立 git 仓。
+# `memoryRoot` **可省略** —— 省略时用默认值 `~/.dsh/memory`。
+# 若要显式指定:必须是不含 `~` 的**绝对路径**(它会被 path.resolve,`~` 不会被展开);
+# 且目标目录要先存在并含 `MEMORY.md`,否则注入段会静默为空。
+- insert:
+    - id: plugin-memory
+      name: 'dsh-memory'
+      config:
+        # 常驻注入段的硬预算(行数 / 字节,双限,超限截断并留可见标记)
+        maxIndexLines: 60
+        maxIndexBytes: 4096
+        # 段落 order。100 = 紧跟 persona(0)、早于策略(500)与工具描述(1000+)
+        sectionOrder: 100
+        # 单次检索最多扫描的文件数(限制工作量,因为 timeoutMs 中断不了同步 IO)
+        maxScanFiles: 500
+        # memoryRoot: 'C:/Users/you/.dsh/memory'   # 省略即用默认 ~/.dsh/memory
