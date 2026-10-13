@@ -173,9 +173,24 @@ into the next task's starting state.」(Letta #3388 评论)
    `~/.dsh/profiles/<p>/package.json` 的 `dsh.profile.bundles` 时才会被消费
    (消费点:`@deepseek-ai/dsh-app-boot/lib/index.js:932` → `bundlePatchPaths()`,按
    `@deepseek-ai/dsh/lib/profile-boot-*.js:194` 的 bundles 顺序)。
-   本机用的是**手工 insert**(`dsh-memory` **不在** bundles 数组里),所以那个字段当前是**惰性**的。
-   ⚠ 若哪天把它加进 bundles,**必须同时删掉** profile 里那段 `- insert: id: plugin-memory`,
-   否则同一个 id 被应用两次。
+
+   ⚠⚠ **2026-10-11 实测事故 —— 本条预言过的故障真的发生了。**
+   本机一度**同时**用了两种方式:`dsh-memory` 被加进 bundles(走 ①),
+   而 profile 里那段 `- insert:`(走 ②)**没删**。后果:插件被挂载两次,
+   第二次 `ctx.systemPrompt.section({name:'dsh-memory:index'})` 抛
+   `prompt section "dsh-memory:index" is already registered`,
+   启动日志报 `dsh: warning: 1 entry did not activate`(`dsh-err-20261011-095210.log`)。
+   - ⚠ **关键细节(本条初稿说错了)**:初稿写"否则同一个 id 被应用两次" ——
+     实际两个 entry 的 **id 不同**(profile 用 `dsh-memory`,插件自带文件用 `plugin-memory`),
+     **cordis 按 id 去重 ⇒ 不同 id 不去重** ⇒ 照样挂两次。
+     **判据是"同一个插件",不是"同一个 id"。**
+   - **影响面**:记忆段本身照常注入(失败的是冗余的第二次注册)⇒ 只产生警告,无功能损失。
+     但 `1 entry did not activate` 这个信号在本机历史上意味着"东西凭空消失",**必须盯**。
+   - **处置(2026-10-11)**:删除 profile 里那段 `- insert:`,**改走 ① bundle 方式** ——
+     因为插件自带的 `cordis.patch.yml` 配置更全(预算 / order / 扫描上限都在那里),
+     profile 那段只给了 `memoryRoot`。
+   - **现状**:本机用的是 **①**(`dsh-memory` 在 bundles 数组里,profile 无对应 insert)。
+   - ⚠ 换回 ② 也完全可以,但**必须同时从 bundles 移除**,否则复发。
 
 10. ⚠ **`memory_read` 与 `memory_search` 的收录判据必须一致 —— 不一致必须对调用方可见。**
    凡是 read 能读到的,search 就必须能搜到;反之亦然。分裂会让「搜索说没有」与「读得到」
